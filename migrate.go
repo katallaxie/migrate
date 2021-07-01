@@ -3,6 +3,7 @@ package migrate
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/jmoiron/sqlx"
@@ -27,15 +28,23 @@ func (s *SqlxMigrate) Add(m SqlxMigration) {
 	s.Migrations = append(s.Migrations, m)
 }
 
-// Run ...
-func (s *SqlxMigrate) Run(sqlDB *sqlx.DB, dialect string) error {
-	db := sqlx.NewDb(sqlDB, dialect)
+// Step applies 1 migration (up)
+func (s *SqlxMigrate) Step(db *sqlx.DB) (int, int, error) {
+	return s.Run(db, 1)
+}
 
+// Migrate ...
+func (s *SqlxMigrate) Migrate(db *sqlx.DB) (int, int, error) {
+	return s.Run(db, math.MaxInt32)
+}
+
+// Run ...
+func (s *SqlxMigrate) Run(db *sqlx.DB, steps int) (int, int, error) {
 	s.rw.Lock()
 	defer s.rw.Unlock()
 
 	if err := s.createMigrationTable(db); err != nil {
-		return err
+		return -1, 0, err
 	}
 
 	for _, m := range s.Migrations {
@@ -62,15 +71,6 @@ func (s *SqlxMigrate) TableName() string {
 // ColumnName ...
 func (s *SqlxMigrate) ColumnName() string {
 	return "version"
-}
-
-func (s *SqlxMigrate) createMigrationTable(db *sql.DB) error {
-	_, err := db.Exec(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" ( "%s" INTEGER )`, s.TableName(), s.ColumnName()))
-	if err != nil {
-		return fmt.Errorf("creating migrations table: %w", err)
-	}
-
-	return nil
 }
 
 func (s *SqlxMigrate) run(db *sqlx.DB, m SqlxMigration) error {
@@ -100,21 +100,34 @@ func (s *SqlxMigrate) run(db *sqlx.DB, m SqlxMigration) error {
 	return nil
 }
 
-func (s *SqlxMigrate) selectVersion(db *sql.DB) (int, error) {
-	var row struct {
-		Version int
-	}
-
-	_, err := db.Exec(fmt.Sprintf(`SELECT "%s" FROM "%s" LIMIT 1`, s.ColumnName(), s.TableName()), row.Version)
-	if err != nil {
-		return -1, fmt.Errorf("creating migrations table: %w", err)
-	}
-
-	return row.Version, nil
+// SqlxVersion ...
+type SqlxVersion struct {
+	Version int
 }
 
-func (s *SqlxMigrate) insertVersion(db *sql.DB) error {
-	_, err := db.Exec(fmt.Sprintf(`INSERT INTO "%s" ( "%s" ) VALUES ( $1 )`, s.TableName(), s.ColumnName()))
+func (s *SqlxMigrate) createMigrationTable(db *sqlx.DB) error {
+	_, err := db.Exec(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" ( "%s" INTEGER )`, s.TableName(), s.ColumnName()))
+	if err != nil {
+		return fmt.Errorf("creating migrations table: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SqlxMigrate) selectVersion(db *sqlx.DB) (int, error) {
+	var version SqlxVersion
+	version.Version = -1
+
+	err := db.Get(&version, "SELECT $1 FROM $2 LIMIT 1", s.ColumnName(), s.TableName())
+	if err != nil {
+		return version.Version, fmt.Errorf("creating migrations table: %w", err)
+	}
+
+	return version.Version, nil
+}
+
+func (s *SqlxMigrate) insertVersion(db *sql.DB, version int) error {
+	_, err := db.Exec(fmt.Sprintf(`INSERT INTO $1 ( $2 ) VALUES ( $3 )`, s.TableName(), version, s.ColumnName()))
 	if err != nil {
 		return fmt.Errorf("creating migrations table: %w", err)
 	}
@@ -133,13 +146,13 @@ func (s *SqlxMigrate) updateVersion(db *sql.DB) error {
 
 // SqlxMigration ...
 type SqlxMigration struct {
-	ID   int
+	id   int
 	Up   func(tx *sqlx.Tx) error
 	Down func(tx *sqlx.Tx) error
 }
 
-// QueryMigration ...
-func QueryMigration(id, upQuery, downQuery string) SqlxMigration {
+// NewMigration ...
+func NewMigration(up, down string) SqlxMigration {
 	queryFn := func(query string) func(tx *sqlx.Tx) error {
 		if query == "" {
 			return nil
@@ -152,8 +165,8 @@ func QueryMigration(id, upQuery, downQuery string) SqlxMigration {
 	}
 
 	m := SqlxMigration{
-		Up:   queryFn(upQuery),
-		Down: queryFn(downQuery),
+		Up:   queryFn(up),
+		Down: queryFn(down),
 	}
 
 	return m
