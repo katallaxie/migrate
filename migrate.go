@@ -24,40 +24,96 @@ func New() *SqlxMigrate {
 
 // Add ...
 func (s *SqlxMigrate) Add(m SqlxMigration) {
-	m.id = len(s.Migrations)
+	m.id = len(s.Migrations) + 1
 	s.Migrations = append(s.Migrations, m)
 }
 
 // Step applies 1 migration (up)
-func (s *SqlxMigrate) Step(db *sqlx.DB) (int, int, error) {
+func (s *SqlxMigrate) Step(db *sqlx.DB) (int, error) {
 	return s.Run(db, 1)
 }
 
 // Migrate ...
-func (s *SqlxMigrate) Migrate(db *sqlx.DB) (int, int, error) {
+func (s *SqlxMigrate) Migrate(db *sqlx.DB) (int, error) {
 	return s.Run(db, math.MaxInt32)
 }
 
 // Run ...
-func (s *SqlxMigrate) Run(db *sqlx.DB, steps int) (int, int, error) {
+func (s *SqlxMigrate) Run(db *sqlx.DB, steps int) (int, error) {
 	s.rw.Lock()
 	defer s.rw.Unlock()
 
+	version := -1
 	if err := s.createMigrationTable(db); err != nil {
-		return -1, 0, err
+		return -1, err
 	}
 
 	for _, m := range s.Migrations {
-		var found int
-		err := db.Get(&found, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" ( "%s" INTEGER )`, s.TableName(), s.ColumnName()), m.ID)
-		if err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("looking up migration by id: %w", err)
+		found, err := s.selectVersion(db, m.id)
+		if err != nil {
+			return version, err
 		}
 
-		err = s.runMigration(db, m)
-		if err != nil {
-			return err
+		if found {
+			continue
 		}
+
+		err = s.migrate(db, m)
+		if err != nil {
+			return version, err
+		}
+
+		version = m.id
+	}
+
+	return version, nil
+}
+
+func (s *SqlxMigrate) rollback(db *sqlx.DB, m SqlxMigration) error {
+	errorf := func(err error) error { return fmt.Errorf("running rollback: %w", err) }
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return errorf(err)
+	}
+
+	err = m.Down(tx)
+	if err != nil {
+		tx.Rollback()
+		return errorf(err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return errorf(err)
+	}
+
+	return nil
+}
+
+func (s *SqlxMigrate) migrate(db *sqlx.DB, m SqlxMigration) error {
+	errorf := func(err error) error { return fmt.Errorf("running migration: %w", err) }
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return errorf(err)
+	}
+
+	fmt.Println(m.id)
+
+	err = s.insertVersion(db, m.id)
+	if err != nil {
+		tx.Rollback()
+		return errorf(err)
+	}
+	err = m.Up(tx)
+	if err != nil {
+		tx.Rollback()
+		return errorf(err)
+	}
+	err = tx.Commit()
+	if err != nil {
+		return errorf(err)
 	}
 
 	return nil
@@ -71,33 +127,6 @@ func (s *SqlxMigrate) TableName() string {
 // ColumnName ...
 func (s *SqlxMigrate) ColumnName() string {
 	return "version"
-}
-
-func (s *SqlxMigrate) run(db *sqlx.DB, m SqlxMigration) error {
-	errorf := func(err error) error { return fmt.Errorf("running migration: %w", err) }
-
-	tx, err := db.Beginx()
-	if err != nil {
-		return errorf(err)
-	}
-	_, err = db.Exec("INSERT INTO migrations (id) VALUES ($1)", m.ID)
-	if err != nil {
-		tx.Rollback()
-		return errorf(err)
-	}
-
-	err = m.Migrate(tx)
-	if err != nil {
-		tx.Rollback()
-		return errorf(err)
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return errorf(err)
-	}
-
-	return nil
 }
 
 // SqlxVersion ...
@@ -114,20 +143,27 @@ func (s *SqlxMigrate) createMigrationTable(db *sqlx.DB) error {
 	return nil
 }
 
-func (s *SqlxMigrate) selectVersion(db *sqlx.DB) (int, error) {
-	var version SqlxVersion
-	version.Version = -1
-
-	err := db.Get(&version, "SELECT $1 FROM $2 LIMIT 1", s.ColumnName(), s.TableName())
-	if err != nil {
-		return version.Version, fmt.Errorf("creating migrations table: %w", err)
+func (s *SqlxMigrate) selectVersion(db *sqlx.DB, version int) (bool, error) {
+	var row struct {
+		Version int
 	}
 
-	return version.Version, nil
+	err := db.Get(&row, fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE %s = $1`, s.ColumnName(), s.TableName(), s.ColumnName()), version)
+	if err != nil && err != sql.ErrNoRows {
+		return false, fmt.Errorf("select current version: %w", err)
+	}
+
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+
+	return true, nil
 }
 
-func (s *SqlxMigrate) insertVersion(db *sql.DB, version int) error {
-	_, err := db.Exec(fmt.Sprintf(`INSERT INTO $1 ( $2 ) VALUES ( $3 )`, s.TableName(), version, s.ColumnName()))
+func (s *SqlxMigrate) insertVersion(db *sqlx.DB, version int) error {
+	fmt.Println(version)
+
+	_, err := db.Exec(fmt.Sprintf(`INSERT INTO "%s" ( "%s" ) VALUES ( $1 )`, s.TableName(), s.ColumnName()), version)
 	if err != nil {
 		return fmt.Errorf("creating migrations table: %w", err)
 	}
@@ -135,7 +171,7 @@ func (s *SqlxMigrate) insertVersion(db *sql.DB, version int) error {
 	return nil
 }
 
-func (s *SqlxMigrate) updateVersion(db *sql.DB) error {
+func (s *SqlxMigrate) updateVersion(db *sqlx.DB) error {
 	_, err := db.Exec(fmt.Sprintf(`UPDATE "%s" SET "%s" = $1 WHERE "%s" = $2`, s.TableName(), s.ColumnName(), s.ColumnName()))
 	if err != nil {
 		return fmt.Errorf("creating migrations table: %w", err)
