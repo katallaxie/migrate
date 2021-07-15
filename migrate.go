@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"strconv"
 	"sync"
 
 	"github.com/jmoiron/sqlx"
@@ -135,7 +136,7 @@ type SqlxVersion struct {
 }
 
 func (s *SqlxMigrate) createMigrationTable(db *sqlx.DB) error {
-	_, err := db.Exec(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" ( "%s" INTEGER )`, s.TableName(), s.ColumnName()))
+	_, err := db.Exec(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s ( %s INTEGER )`, s.TableName(), s.ColumnName()))
 	if err != nil {
 		return fmt.Errorf("creating migrations table: %w", err)
 	}
@@ -148,7 +149,7 @@ func (s *SqlxMigrate) selectVersion(db *sqlx.DB, version int) (bool, error) {
 		Version int
 	}
 
-	err := db.Get(&row, fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE %s = $1`, s.ColumnName(), s.TableName(), s.ColumnName()), version)
+	err := db.Get(&row, fmt.Sprintf(`SELECT %s FROM %s WHERE %s=%s`, s.ColumnName(), s.TableName(), s.ColumnName(), strconv.Itoa(version)))
 	if err != nil && err != sql.ErrNoRows {
 		return false, fmt.Errorf("select current version: %w", err)
 	}
@@ -161,18 +162,7 @@ func (s *SqlxMigrate) selectVersion(db *sqlx.DB, version int) (bool, error) {
 }
 
 func (s *SqlxMigrate) insertVersion(db *sqlx.DB, version int) error {
-	fmt.Println(version)
-
-	_, err := db.Exec(fmt.Sprintf(`INSERT INTO "%s" ( "%s" ) VALUES ( $1 )`, s.TableName(), s.ColumnName()), version)
-	if err != nil {
-		return fmt.Errorf("creating migrations table: %w", err)
-	}
-
-	return nil
-}
-
-func (s *SqlxMigrate) updateVersion(db *sqlx.DB) error {
-	_, err := db.Exec(fmt.Sprintf(`UPDATE "%s" SET "%s" = $1 WHERE "%s" = $2`, s.TableName(), s.ColumnName(), s.ColumnName()))
+	_, err := db.Exec(fmt.Sprintf(`INSERT INTO %s ( %s ) VALUES ( %s )`, s.TableName(), s.ColumnName(), strconv.Itoa(version)))
 	if err != nil {
 		return fmt.Errorf("creating migrations table: %w", err)
 	}
