@@ -100,8 +100,6 @@ func (s *SqlxMigrate) migrate(db *sqlx.DB, m SqlxMigration) error {
 		return errorf(err)
 	}
 
-	fmt.Println(m.id)
-
 	err = s.insertVersion(db, m.id)
 	if err != nil {
 		tx.Rollback()
